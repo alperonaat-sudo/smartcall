@@ -1,0 +1,20 @@
+📞 Smart Call Bot Kurulum Bilgilendirmesi
+
+Merhaba!
+Öncelikle Smart Call Bot programını indirdiğiniz için teşekkür ederiz. 🙌
+
+Programın düzgün çalışması için aşağıdaki adımları izleyin:
+
+Model klasörünü masaüstüne veya doğrudan *C:* dizinine kopyalayın.
+(Örnek: C:\model şeklinde olabilir.)
+
+VB-Cable programını kurun.
+Bu sanal ses sürücüsü, programın ses analizini doğru yapabilmesi için gereklidir.
+
+Eğer otomatik ses ayırma (yani çağrı sesini ayrı yakalama) özelliğini kullanmak istiyorsanız,
+varsayılan ses çıkışınızı “CABLE Input” olarak ayarlayın.
+
+Kurulum tamamlandıktan sonra smart_call_bot.exe dosyasını çalıştırabilirsiniz.
+
+İyi kullanımlar! 🎧
+Smart Call Bot Ekibi
