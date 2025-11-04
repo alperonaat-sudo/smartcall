@@ -1,0 +1,1144 @@
+import os
+import sys
+import platform
+import uuid
+import threading
+import time
+import json
+import base64
+from typing import Optional
+import requests
+import pyautogui
+import pyperclip  # pip install pyperclip
+import pythoncom  # WMI için gerekli (Windows)
+import wmi
+from pynput import keyboard as pyn_keyboard
+import customtkinter as ctk
+from tkinter import Toplevel, filedialog, messagebox
+import openpyxl
+import sounddevice as sd
+#import queue
+#import vosk
+#import random
+
+
+# ---------------- Masaüstü klasörü ve ayarlar dosyası ----------------
+DESKTOP = os.path.join(os.path.expanduser("~"), "Desktop")
+SMARTCALL_DIR = os.path.join(DESKTOP, "SmartCall")
+AYARLAR_DOSYA = os.path.join(SMARTCALL_DIR, "ayarlar.json")
+
+# Klasör yoksa oluştur
+if not os.path.exists(SMARTCALL_DIR):
+    os.makedirs(SMARTCALL_DIR)
+
+
+# ================== Dosya Yolu ==================
+BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+DESKTOP = os.path.join(os.path.expanduser("~"), "Desktop")
+INVEKTO_DIR = os.path.join(DESKTOP, "Invekto")
+os.makedirs(INVEKTO_DIR, exist_ok=True)
+AYARLAR_DOSYA = os.path.join(INVEKTO_DIR, "ayarlar.json")
+
+# ===== Şifreli veriler (base64) =====
+_API_URL_ENC = b"aHR0cHM6Ly93b3Jrc3BhY2VzLTZvMDIub25yZW5kZXIuY29tL2FwaS92ZXJpZnk="
+_SECRET_PASSPHRASE_ENC = b"c3VwZXItc2VjcmV0LXBhc3M="
+
+_WS_PART1 = "d3NzOi8v"
+_WS_PART2 = "d29ya3NwYWNlcy02bzAyLm9u"
+_WS_PART3 = "cmVuZGVyLmNvbS93cy8="
+
+SECRET_PASSPHRASE = base64.b64decode(_SECRET_PASSPHRASE_ENC).decode("utf-8")
+
+
+def get_api_url() -> str:
+    return base64.b64decode(_API_URL_ENC).decode()
+
+
+def get_ws_url(license_key: str) -> str:
+    encoded = _WS_PART1 + _WS_PART2 + _WS_PART3
+    base_url = base64.b64decode(encoded).decode()
+    return f"{base_url}{license_key}"
+
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+
+# ================== Ayar Dosyası (dosya işlemleri) ==================
+def save_settings(data):
+    """Not ayarlarını Invekto klasörüne kaydet"""
+    try:
+        with open(AYARLAR_DOSYA, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("save_settings hata:", e)
+
+
+def load_settings_file():
+    """Invekto klasöründen ayarları yükle"""
+    if os.path.exists(AYARLAR_DOSYA):
+        try:
+            with open(AYARLAR_DOSYA, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print("load_settings_file hata:", e)
+            return None
+    return {"durum_tanimlari": {}, "not_al": False, "show_not_window": True}
+
+
+# ================== Cihaz Bilgisi ==================
+#def get_device_info() -> dict:
+    #try:
+        #mac_num = hex(uuid.getnode()).replace("0x", "").upper()
+        #mac = ":".join(mac_num[i : i + 2] for i in range(0, len(mac_num), 2))
+    #except Exception as e:
+        #print("MAC Hatası:", e)
+        #mac = "00:00:00:00:00:00"
+
+    #try:
+        #cpu = platform.processor() or "UnknownCPU"
+    #except Exception as e:
+        #print("CPU Hatası:", e)
+        #cpu = "UnknownCPU"
+
+    #bios_uuid = "UnknownUUID"
+    #disk_serial = "UnknownDisk"
+
+    #if platform.system() == "Windows":
+        #try:
+            #pythoncom.CoInitialize()
+            #c = wmi.WMI()
+
+            #try:
+                #bios_uuid = c.Win32_ComputerSystemProduct()[0].UUID
+            #except Exception as e:
+                #print("BIOS UUID Hatası:", e)
+
+            #try:
+                #disk_serial = c.Win32_DiskDrive()[0].SerialNumber
+            #except Exception as e:
+                #print("Disk Serial Hatası:", e)
+        #except Exception as e:
+            #print("WMI erişim hatası:", e)
+
+    #return {
+        #"mac": mac,
+        #"cpu": cpu,
+        #"bios_uuid": bios_uuid,
+        #"disk_serial": disk_serial,
+    #}
+
+# -------------------- Excel Ayırma Özelliği --------------------
+
+
+class ExcelAyirici:
+    def __init__(self, parent):
+        self.parent = parent
+        self.excel_path = None
+        self.durumlar = []
+        self.secili_durumlar = []
+        self.manual_durum = ""
+
+        self.window = ctk.CTkToplevel(parent)
+        self.window.title("Excel Ayırma")
+        self.window.geometry("480x500")
+
+        ctk.CTkButton(self.window, text="📂 Excel Seç", command=self.choose_excel).pack(pady=10, fill="x", padx=20)
+        self.frame_durumlar = ctk.CTkScrollableFrame(self.window, width=440, height=300)
+        self.frame_durumlar.pack(padx=20, pady=10, fill="both", expand=True)
+
+        ctk.CTkButton(self.window, text="✅ Kaydet", command=self.save_filtered_excel, fg_color="green").pack(pady=10, fill="x", padx=20)
+        ctk.CTkButton(self.window, text="❌ Kapat", command=self.window.destroy, fg_color="red").pack(pady=5, fill="x", padx=20)
+
+    def choose_excel(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        if not path:
+            return
+        self.excel_path = path
+        self.load_durumlar()
+
+    def load_durumlar(self):
+        for widget in self.frame_durumlar.winfo_children():
+            widget.destroy()
+        self.durumlar.clear()
+
+        wb = openpyxl.load_workbook(self.excel_path)
+        ws = wb.active
+        for row_idx in range(2, ws.max_row + 1):
+            val = ws.cell(row=row_idx, column=3).value
+            if val and val not in self.durumlar:
+                self.durumlar.append(val)
+        wb.close()
+
+        # Checkbox / Button listesi
+        self.check_vars = {}
+        for durum in self.durumlar:
+            var = ctk.BooleanVar(value=False)
+            chk = ctk.CTkCheckBox(self.frame_durumlar, text=durum, variable=var)
+            chk.pack(anchor="w", pady=2, padx=5)
+            self.check_vars[durum] = var
+
+        # Manuel durum girişi
+        ctk.CTkLabel(self.frame_durumlar, text="Manuel Durum Ekle:").pack(anchor="w", pady=(10,2), padx=5)
+        self.manual_entry = ctk.CTkEntry(self.frame_durumlar)
+        self.manual_entry.pack(fill="x", padx=5)
+
+    def save_filtered_excel(self):
+        # seçili durumları al
+        self.secili_durumlar = [d for d, var in self.check_vars.items() if var.get()]
+        manual_val = self.manual_entry.get().strip()
+        if manual_val:
+            self.secili_durumlar.append(manual_val)
+
+        if not self.secili_durumlar:
+            messagebox.showwarning("Uyarı", "En az bir durum seçin veya manuel girin!")
+            return
+
+        save_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
+        if not save_path:
+            return
+
+        # Excel filtreleme ve kaydetme
+        wb = openpyxl.load_workbook(self.excel_path)
+        ws = wb.active
+        new_wb = openpyxl.Workbook()
+        new_ws = new_wb.active
+
+        # Başlıkları kopyala
+        for col in range(1, ws.max_column + 1):
+            new_ws.cell(row=1, column=col, value=ws.cell(row=1, column=col).value)
+
+        new_row = 2
+        for row_idx in range(2, ws.max_row + 1):
+            val = ws.cell(row=row_idx, column=3).value
+            if val in self.secili_durumlar:
+                for col in range(1, ws.max_column + 1):
+                    new_ws.cell(row=new_row, column=col, value=ws.cell(row=row_idx, column=col).value)
+                new_row += 1
+
+        new_wb.save(save_path)
+        new_wb.close()
+        messagebox.showinfo("Tamamlandı", f"{len(self.secili_durumlar)} durum seçildi ve yeni Excel kaydedildi!")
+
+# ================== Lisans Doğrulama ==================
+class LicenseWindow(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("🔑 Lisans Doğrulama")
+        self.geometry("320x220")
+
+        ctk.CTkLabel(self, text="Kullanıcı Adı:").pack(pady=6)
+        self.entry_user = ctk.CTkEntry(self, width=220)
+        self.entry_user.pack()
+
+        ctk.CTkLabel(self, text="Lisans Anahtarı:").pack(pady=6)
+        self.entry_key = ctk.CTkEntry(self, width=220)
+        self.entry_key.pack()
+
+        ctk.CTkButton(self, text="Doğrula", command=self.validate_license).pack(pady=14)
+
+    def validate_license(self):
+        username = self.entry_user.get().strip()
+        key = self.entry_key.get().strip()
+        if not username or not key:
+            messagebox.showerror("Hata", "Kullanıcı ve lisans giriniz.")
+            return
+
+        #device_info = get_device_info()
+
+        #payload = {
+            #"username": username,
+            #"key": key,
+            #"mac": device_info["mac"],
+            #"cpu": device_info["cpu"],
+            #"bios_uuid": device_info["bios_uuid"],
+            #"disk_serial": device_info["disk_serial"],
+            #"client_secret": "",
+        #}
+
+        #try:
+            #r = requests.post(get_api_url(), json=payload, timeout=6)
+            #r.raise_for_status()
+            #data = r.json()
+        #except requests.exceptions.ConnectionError:
+            #messagebox.showerror(
+                #"Bağlantı Hatası",
+                #"Sunucuya bağlanılamadı. Lütfen internet bağlantınızı kontrol edin."
+            #)
+            #return
+        #except requests.exceptions.Timeout:
+            #messagebox.showerror(
+                #"Zaman Aşımı",
+                #"Sunucuya bağlanırken zaman aşımına uğradı. Lütfen tekrar deneyin."
+            #)
+            #return
+        #except Exception:
+            #messagebox.showerror(
+                #"Hata",
+                #"Lisans doğrulama sırasında bir hata oluştu. Lütfen daha sonra tekrar deneyin."
+            #)
+            #return
+
+        #if data.get("status"):
+            #self.destroy()
+            #app = InvektoBot()
+            #app.mainloop()
+        #else:
+            #messagebox.showerror("Geçersiz", "Lisans geçersiz veya doğrulama başarısız!")
+
+
+
+# ============================================================
+# 📞 Kullanılmayan Numaraları Ayırma Penceresi (InvektoBot ile entegre)
+# ============================================================
+class UnusedNumberWindow(ctk.CTkToplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Kullanılmayan Numaraları Ayır")
+        self.geometry("600x560")
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.parent = parent
+
+        # --- Çalışma durumu ---
+        self.stop_flag = False
+        self.thread = None
+        self.is_running = False
+
+        # --- İlerleme durumu ---
+        self.total = len(getattr(self.parent, "numbers", []))
+        self.current_i = getattr(self.parent, "start_index", 0)
+        self.done = self.current_i
+        self._start_all_ts = None
+        self._avg_call_secs = 10.0
+
+        # === ÜST BAR ===
+        topbar = ctk.CTkFrame(self)
+        topbar.pack(fill="x", padx=12, pady=(12, 6))
+        ctk.CTkLabel(topbar, text="📞 Kullanılmayan Numaraları Ayırma", font=("Arial", 16, "bold")).pack(side="left", padx=8)
+        ctk.CTkButton(topbar, text="📘 Bilgi", width=96, height=34, command=self.open_info).pack(side="right", padx=8)
+
+        # === DURUM SATIRLARI ===
+        self.model_status = ctk.CTkLabel(self, text="", font=("Arial", 12))
+        self.model_status.pack(pady=(4, 2))
+        self.check_model_and_audio()
+
+        self.label_numara = ctk.CTkLabel(self, text="Aranan Numara: -", font=("Arial", 14))
+        self.label_numara.pack(pady=(6, 3))
+
+        self.label_durum = ctk.CTkLabel(self, text="Durum: Bekleniyor…", font=("Arial", 14))
+        self.label_durum.pack(pady=(2, 3))
+
+        self.label_sayac = ctk.CTkLabel(self, text=f"{self.done} / {self.total}", font=("Arial", 12))
+        self.label_sayac.pack(pady=(2, 8))
+
+        # === İLERLEME ===
+        self.progress = ctk.CTkProgressBar(self, width=480)
+        self.progress.pack(pady=(6, 2))
+        self.progress.set((self.done / self.total) if self.total else 0)
+
+        self.label_progress = ctk.CTkLabel(self, text=f"İlerleme: %{int((self.done / self.total) * 100) if self.total else 0}", font=("Arial", 12))
+        self.label_progress.pack(pady=(2, 2))
+
+        self.label_time = ctk.CTkLabel(self, text="⏳ Kalan Süre: -", font=("Arial", 12))
+        self.label_time.pack(pady=(2, 12))
+
+        # === DİNLENEN METİN ===
+        ctk.CTkLabel(self, text="🎧 Dinlenen Ses (metin):", font=("Arial", 12, "bold")).pack(pady=(2, 2))
+        self.text_output = ctk.CTkTextbox(self, height=140, width=520)
+        self.text_output.pack(pady=(4, 10))
+
+        # === BUTONLAR ===
+        btns = ctk.CTkFrame(self)
+        btns.pack(pady=14)
+        self.btn_baslat = ctk.CTkButton(btns, text="▶ Başlat / Devam Et", width=200, height=44,
+                                        fg_color="#0B72E7", font=("Arial", 14, "bold"),
+                                        command=self.start_process)
+        self.btn_baslat.pack(side="left", padx=12)
+
+        self.btn_durdur = ctk.CTkButton(btns, text="⏹ Durdur", width=200, height=44,
+                                        fg_color="#D32F2F", font=("Arial", 14, "bold"),
+                                        command=self.stop_process, state="disabled")
+        self.btn_durdur.pack(side="left", padx=12)
+
+        # === MODEL / AUDIO ===
+        self.device_index = None
+        self.model_path = self.get_model_path()
+        self._warn_if_coords_missing()
+
+    # ---------------- Yardımcılar ----------------
+    def _warn_if_coords_missing(self):
+        if not getattr(self.parent, "ara_coord", None) or not getattr(self.parent, "kapat_coord", None):
+            messagebox.showwarning(
+                "Koordinatlar Eksik",
+                "Arama ve/veya kapat koordinatları atanmamış görünüyor.\n\n"
+                "• '🎯 Arama Kutusu Koordinat Seç'\n"
+                "• '❌ Çağrıyı Bitir Koordinat Seç'\n\n"
+                "butonlarını kullanarak koordinatları belirleyin."
+            )
+
+    def open_info(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Kullanım Talimatları")
+        win.geometry("520x420")
+        win.resizable(False, False)
+        txt = (
+            "📘 KULLANIM TALİMATI\n\n"
+            "1) Model klasörü öncelik sırasıyla:\n"
+            "   - C:\\model\n"
+            "   - Masaüstü\\model\n"
+            "   Bulunamazsa klasör seçim penceresi açılır.\n\n"
+            "2) Ses kaynağı: VB-Audio Cable Input (veya benzeri sanal cihaz).\n"
+            "3) Başlat/Devam Et: kaldığı satırdan devam eder.\n"
+            "4) Durdur: güvenli durdurma (reset yok). Tekrar Başlat ile kaldığı yerden sürer.\n"
+            "5) İlerleme yüzdesi ve kalan süre tahmini canlı güncellenir.\n"
+            "6) Koordinatlar atanmadıysa uyarı verir ve aramayı atlar."
+        )
+        tb = ctk.CTkTextbox(win, height=360, width=500)
+        tb.pack(padx=10, pady=10)
+        tb.insert("1.0", txt)
+        tb.configure(state="disabled")
+
+    def get_model_path(self):
+        p1 = r"C:\model"
+        if os.path.exists(p1):
+            return p1
+        desktop = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+        p2 = os.path.join(desktop, "model")
+        if os.path.exists(p2):
+            return p2
+        messagebox.showwarning("Model Bulunamadı", "Model klasörü bulunamadı. Lütfen model klasörünü seçin.")
+        folder = filedialog.askdirectory(title="Model Klasörünü Seç")
+        return folder if folder else None
+
+    def check_model_and_audio(self):
+        model_ok = os.path.exists(self.get_model_path() or "")
+        try:
+            names = [str(d.get("name", "")) for d in sd.query_devices()]
+            audio_ok = any(("VB-Audio" in n or "Cable" in n) for n in names)
+        except Exception:
+            audio_ok = False
+
+        if model_ok and audio_ok:
+            self.model_status.configure(text="✅ Model ve ses kaynağı hazır.", text_color="green")
+        elif model_ok and not audio_ok:
+            self.model_status.configure(text="⚠️ Model var, ses kaynağı yok.", text_color="orange")
+        elif not model_ok and audio_ok:
+            self.model_status.configure(text="⚠️ Ses var, model klasörü yok.", text_color="orange")
+        else:
+            self.model_status.configure(text="⚠️ Model ve ses kaynağı eksik.", text_color="orange")
+
+    # ---------------- Başlat / Durdur ----------------
+    def start_process(self):
+        if self.is_running:
+            return
+        if not getattr(self.parent, "numbers", None):
+            messagebox.showwarning("Uyarı", "Önce Excel’den numaraları yükleyin.")
+            return
+
+        self.stop_flag = False
+        self.is_running = True
+        self.btn_baslat.configure(state="disabled")
+        self.btn_durdur.configure(state="normal")
+        self.label_durum.configure(text="Durum: Başlatıldı…")
+
+        if self._start_all_ts is None:
+            self._start_all_ts = time.time()
+
+        if self.done == 0:
+            self.text_output.delete("1.0", "end")
+
+        self.thread = threading.Thread(target=self.run_cycle, daemon=True)
+        self.thread.start()
+
+    def stop_process(self):
+        self.stop_flag = True
+        self.is_running = False
+        self.btn_durdur.configure(state="disabled")
+        self.btn_baslat.configure(state="normal")
+        self.label_durum.configure(text="Durum: Durduruldu (kaldığı yer kayıtlı).")
+
+    # ---------------- Ana Döngü ----------------
+    def run_cycle(self):
+        try:
+            while not self.stop_flag and self.current_i < self.total:
+                row_idx, num = self.parent.numbers[self.current_i]
+                num_str = str(num)
+
+                self.label_numara.configure(text=f"Aranan Numara: {num_str}")
+                self.label_durum.configure(text="Durum: Arama başlatılıyor…")
+                self.update_idletasks()
+
+                call_start = time.time()
+                try:
+                    if getattr(self.parent, "ara_coord", None):
+                        x, y = self.parent.ara_coord
+                        pyautogui.click(x, y)
+                        time.sleep(0.15)
+                        pyautogui.click(x, y)
+                        pyperclip.copy(num_str)
+                        pyautogui.hotkey("ctrl", "v")
+                        time.sleep(0.08)
+                        pyautogui.press("enter")
+                except Exception as e:
+                    print("Tıklama/Arama hatası:", e)
+
+                # === Ses dinleme ===
+                transcript = self.listen_for_keywords(duration=10)
+                durum = self.analyze_result(transcript)
+                self.text_output.insert("end", f"\n[{num_str}] → {durum}\n")
+                self.text_output.see("end")
+
+                try:
+                    if getattr(self.parent, "kapat_coord", None):
+                        pyautogui.click(*self.parent.kapat_coord)
+                except Exception as e:
+                    print("Kapat tıklama hatası:", e)
+
+                # === Excel'e yaz ===
+                try:
+                    excel_path = getattr(self.parent, "excel_path", None)
+                    if excel_path and os.path.exists(excel_path):
+                        wb = openpyxl.load_workbook(excel_path)
+                        ws = wb.active
+
+                        for row in range(1, ws.max_row + 1):
+                            cell_val = str(ws.cell(row=row, column=1).value).strip() if ws.cell(row=row, column=1).value else ""
+                            if cell_val == num_str:
+                                ws.cell(row=row, column=3).value = durum
+                                break
+
+                        wb.save(excel_path)
+                        wb.close()
+                except Exception as e:
+                    print("Excel'e yazma hatası:", e)
+
+                # sayaç ve ilerleme
+                self.done += 1
+                self.current_i += 1
+                self.label_sayac.configure(text=f"{self.done} / {self.total}")
+                self.progress.set(self.done / self.total if self.total else 0)
+                self.label_progress.configure(text=f"İlerleme: %{int((self.done / self.total) * 100) if self.total else 0}")
+                call_dur = time.time() - call_start
+                self._avg_call_secs = (self._avg_call_secs * 0.7) + (call_dur * 0.3)
+                remaining = max(self.total - self.done, 0) * self._avg_call_secs
+                self.label_time.configure(text=f"⏳ Kalan Süre: {int(remaining)} sn")
+                self.update_idletasks()
+
+            if not self.stop_flag:
+                self.label_durum.configure(text="Durum: Tamamlandı ✅")
+                messagebox.showinfo("Bilgi", "Kullanılmayan numaralar tamamlandı.")
+        finally:
+            self.is_running = False
+            self.btn_durdur.configure(state="disabled")
+            self.btn_baslat.configure(state="normal")
+
+
+
+
+# ================== Ana Bot ==================
+class InvektoBot(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("📞 Invekto Smart Call")
+        self.geometry("360x600")
+
+        # Excel / arama değişkenleri
+        self.excel_path: Optional[str] = None
+        self.ara_coord = None
+        self.kapat_coord = None
+        self.numbers: list[tuple[int, str]] = []
+        self.start_index = 0
+        self.running = False
+        self.worker_thread: Optional[threading.Thread] = None
+
+        # Not ayarları ve UI değişkenleri
+        self.not_al = ctk.BooleanVar(value=False)
+        self.otomatik_mod = ctk.BooleanVar(value=False)
+        self.show_not_window = ctk.BooleanVar(value=True)
+
+        # Hotkey: default F8
+        self.hotkey = pyn_keyboard.Key.f8
+        self.hotkey_str = "f8"
+
+        # durum tanımları (1..9)
+        self.durum_tanimlari = {i: f"Durum {i}" for i in range(1, 10)}
+
+        # numaralara ait geçici notlar
+        self.numara_durumlari: dict[str, str] = {}
+
+        # UI / pencere referansları
+        self.durum_entries = {}
+        self.not_win = None
+        self.current_num = None
+        self.unused_win = None  # yeni pencere referansı
+
+        self._stop_event = threading.Event()
+
+        self.stop_unused = False
+
+        # runtime timer başlat
+        self._start_runtime_timer(max_seconds=68400)
+
+        # UI oluştur
+        self._build_ui()
+
+        # Ayarları yükle
+        try:
+            self.load_settings()
+        except Exception as e:
+            print("load_settings hata:", e)
+
+        # klavye dinleyici
+        self.listener = pyn_keyboard.Listener(on_press=self.on_key_press)
+        self.listener.start()
+
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    # -------------------- Kullanılmayan Numaraları Ayırma --------------------
+    def open_unused_window(self):
+        """Kullanılmayan numaraları ayırma ekranını aç."""
+        try:
+            # Eğer pencere zaten açıksa yeniden oluşturma
+            if hasattr(self, "unused_window") and self.unused_window and self.unused_window.winfo_exists():
+                self.unused_window.focus()
+                return
+
+            # Yeni pencere aç
+            self.unused_window = UnusedNumberWindow(self)
+            self.unused_window.grab_set()
+            print("[INFO] Kullanılmayan numaralar penceresi açıldı.")
+
+        except Exception as e:
+            print("[HATA] Kullanılmayan numaralar penceresi açılamadı:", e)
+            messagebox.showerror("Hata", f"Pencere açılırken hata oluştu:\n{e}")
+
+    # -------------------- UI --------------------
+    def _build_ui(self):
+        self.label_sayac = ctk.CTkLabel(self, text="Aranan: 0/0  |  Kalan: 0", font=("Arial", 14))
+        self.label_sayac.pack(pady=10)
+
+        frame_top = ctk.CTkFrame(self)
+        frame_top.pack(pady=5, fill="x", padx=10)
+        ctk.CTkButton(frame_top, text="📂 Excel Seç", command=self.load_excel).pack(pady=5, fill="x")
+        ctk.CTkButton(frame_top, text="🎯 Arama Kutusu Kordinat Seç", command=self.set_coord).pack(pady=5, fill="x")
+        ctk.CTkButton(frame_top, text="❌ Çağrıyı Bitir Kordinat Seç", command=self.set_kapat_coord,
+                      fg_color="#B71C1C", text_color="white", hover_color="#7F0000").pack(pady=5, fill="x")
+
+        self.btn_start = ctk.CTkButton(frame_top, text="▶ Başlat", command=self.toggle_bot, fg_color="green")
+        self.btn_start.pack(pady=5, fill="x")
+
+        frame_mod = ctk.CTkFrame(self)
+        frame_mod.pack(pady=5, fill="x", padx=10)
+        ctk.CTkSwitch(frame_mod, text="", variable=self.otomatik_mod,
+                      text_color="white").pack(side="left", padx=5)
+        ctk.CTkLabel(frame_mod, text="(ESC ile durdur)", text_color="red").pack(side="left", padx=10)
+
+        frame_hotkey = ctk.CTkFrame(self)
+        frame_hotkey.pack(pady=5, fill="x", padx=10)
+        ctk.CTkLabel(frame_hotkey, text="Başlat/Durdur Tuşu:").pack(side="left", padx=5)
+        self.entry_hotkey = ctk.CTkEntry(frame_hotkey, placeholder_text="örn: F8 veya z", width=120)
+        self.entry_hotkey.pack(side="left", padx=5)
+        ctk.CTkButton(frame_hotkey, text="Ata", command=self.set_hotkey).pack(side="left", padx=5)
+
+        frame_durum_btn = ctk.CTkFrame(self)
+        frame_durum_btn.pack(pady=5, fill="x", padx=10)
+        ctk.CTkButton(frame_durum_btn, text="📝 Not Ayarları", command=self.open_not_ayar).pack(pady=5, fill="x")
+
+        frame_bottom = ctk.CTkFrame(self)
+        frame_bottom.pack(pady=5, fill="x", padx=10)
+        ctk.CTkButton(frame_bottom, text="💾 Excel’i Kaydet", command=self.save_excel, fg_color="blue").pack(
+            side="left", expand=True, fill="x", padx=5, pady=5)
+        ctk.CTkButton(frame_bottom, text="💾 Kaydet & Çık", command=self.on_closing, fg_color="red").pack(
+            side="left", expand=True, fill="x", padx=5, pady=5)
+
+        frame_extra = ctk.CTkFrame(self)
+        frame_extra.pack(side="bottom", fill="x", padx=10, pady=10)
+        ctk.CTkButton(frame_extra, text="📊 Excel Ayır", command=lambda: ExcelAyirici(self),
+                      fg_color="#1976D2", text_color="white", hover_color="#1565C0").pack(pady=5, fill="x")
+        #ctk.CTkButton(frame_extra, text="Invekto Call Bot +", command=self.open_extra_window,
+                      #fg_color="#4CAF50", text_color="white", hover_color="#2E7D32").pack(pady=2, fill="x")
+        ctk.CTkButton(frame_extra, text="Kullanılmayanları Ayır", command=self.open_unused_window,
+                      fg_color="#9C27B0", text_color="white", hover_color="#7B1FA2").pack(pady=5, fill="x")
+
+        ctk.CTkLabel(frame_extra, text="model:0.0.1", font=("Arial", 10), text_color="gray").pack(pady=2)
+
+        # ---- Excel Kaydet Fonksiyonu ----
+
+    def save_excel(self):
+        if not self.excel_path:
+            messagebox.showwarning("Uyarı", "Kaydedilecek bir Excel dosyası yok!")
+            return
+        try:
+            wb = openpyxl.load_workbook(self.excel_path)
+            ws = wb.active
+            durum_col = 3
+            for idx, num in self.numbers:
+                durum = self.numara_durumlari.get(num, "")
+                if durum:  # sadece durum varsa güncelle
+                    ws.cell(row=idx, column=durum_col, value=durum)
+            wb.save(self.excel_path)
+            wb.close()
+
+            messagebox.showinfo(
+                "Kaydedildi",
+                f"Notlar '{os.path.basename(self.excel_path)}' dosyasına kaydedildi."
+            )
+        except Exception as e:
+            messagebox.showerror("Kaydetme Hatası", f"Excel kaydedilemedi:\n{e}")
+
+    # -------------------- Güvenli Kapanış --------------------
+    def safe_exit(self):
+        try:
+            self.on_closing()
+        except Exception as e:
+            print("Kapanış sırasında hata:", e)
+        finally:
+            try:
+                os._exit(0)
+            except Exception:
+                pass
+
+    # -------------------- Runtime Timer --------------------
+    def _runtime_timer(self, max_seconds):
+        start_time = time.time()
+        while not self._stop_event.is_set():
+            if time.time() - start_time >= max_seconds:
+                print(f"{max_seconds} saniye geçti, program kapanıyor...")
+                try:
+                    self.after(0, self.safe_exit)
+                except Exception:
+                    self.safe_exit()
+                break
+            time.sleep(0.5)
+
+    def _start_runtime_timer(self, max_seconds):
+        t = threading.Thread(target=self._runtime_timer, args=(max_seconds,), daemon=True)
+        t.start()
+
+    # -------------------- Ayar Kaydet / Yükle (SADECE NOT AYARLARI) -------------------
+    def save_settings(self):
+        """
+        Sadece 'Not Ayarları' kalıcı olacak:
+        - durum_tanimlari (anahtarlar string olarak yazılır)
+        - not_al (bool)
+        - show_not_window (bool)
+        - hotkey_str (string)
+        NOT: numara_durumlari veya excel verileri JSON'a yazılmaz.
+        """
+        try:
+            data = {
+                "durum_tanimlari": {str(k): v for k, v in self.durum_tanimlari.items()},
+                "not_al": bool(self.not_al.get()),
+                "show_not_window": bool(self.show_not_window.get()),
+                "hotkey_str": getattr(self, "hotkey_str", "") or "",
+            }
+            # global fonksiyonu çağır
+            save_settings(data)
+        except Exception as e:
+            print("Ayarlar kaydedilemedi:", e)
+
+    def load_settings(self):
+        """
+        Yükleme: JSON'dan durum_tanimlari alınır (string anahtarlar -> int anahtarlar).
+        Ayrıca not_al, show_not_window ve hotkey_str geri yüklenir.
+        """
+        data = load_settings_file()
+        if not data:
+            return
+
+        # durum_tanimlari: anahtarları int'e çevir
+        raw = data.get("durum_tanimlari", {})
+        converted = {}
+        for k, v in raw.items():
+            try:
+                ik = int(k)
+            except Exception:
+                continue
+            converted[ik] = v
+        if converted:
+            self.durum_tanimlari.update(converted)
+
+        # boolean ayarlar
+        try:
+            self.not_al.set(bool(data.get("not_al", False)))
+            self.show_not_window.set(bool(data.get("show_not_window", True)))
+        except Exception:
+            pass
+
+        # hotkey_str
+        hk = data.get("hotkey_str", "")
+        if hk:
+            try:
+                if isinstance(hk, str) and hk.startswith("f") and hk[1:].isdigit():
+                    self.hotkey = getattr(pyn_keyboard.Key, hk)
+                else:
+                    self.hotkey = hk
+                self.hotkey_str = hk
+                # entry varsa doldur
+                try:
+                    if hasattr(self, "entry_hotkey") and isinstance(self.entry_hotkey, ctk.CTkEntry):
+                        self.entry_hotkey.delete(0, "end")
+                        self.entry_hotkey.insert(0, hk)
+                except Exception:
+                    pass
+            except Exception:
+                self.hotkey_str = hk
+
+    # -------------------- UI / Excel --------------------
+    def ui_call(self, fn, *args, **kwargs):
+        self.after(0, lambda: fn(*args, **kwargs))
+
+    def load_excel(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        if not path:
+            return
+        try:
+            wb = openpyxl.load_workbook(path)
+            sheet = wb.active
+            self.numbers.clear()
+            for row_idx in range(2, sheet.max_row + 1):
+                num = sheet.cell(row=row_idx, column=1).value
+                if num:
+                    self.numbers.append((row_idx, str(num)))
+            wb.close()
+            self.excel_path = path
+
+            def set_start():
+                try:
+                    start_val = int(entry_start.get())
+                    if start_val < 1 or start_val > len(self.numbers):
+                        raise ValueError
+                    self.start_index = start_val - 1
+                    top.destroy()
+                    messagebox.showinfo(
+                        "Excel Yüklendi", f"{len(self.numbers)} numara bulundu.\nBaşlangıç satırı: {start_val}"
+                    )
+                    self.update_sayac()
+                except Exception:
+                    messagebox.showerror("Hata", "Geçerli bir sayı giriniz!")
+
+            top = Toplevel(self)
+            top.title("Başlangıç Satırı")
+            top.geometry("400x180")
+
+            lbl = ctk.CTkLabel(top, text="Kaçıncı sıradan başlansın?", text_color="black")
+            lbl.pack(pady=15)
+
+            entry_start = ctk.CTkEntry(top, width=120)
+            entry_start.insert(0, "1")
+            entry_start.pack(pady=10)
+
+            btn_ok = ctk.CTkButton(top, text="Tamam", command=set_start)
+            btn_ok.pack(pady=10)
+
+        except Exception as e:
+            messagebox.showerror("Hata", f"Excel okunamadı:\n{e}")
+
+    def set_coord(self):
+        messagebox.showinfo("Koordinat", "Arama kutusuna fareyi götür ve 3 sn bekle...")
+        self.after(3000, self._capture_ara_coord)
+
+    def _capture_ara_coord(self):
+        self.ara_coord = pyautogui.position()
+        messagebox.showinfo("Koordinat", f"Arama Kutusu: {self.ara_coord}")
+
+    def set_kapat_coord(self):
+        messagebox.showinfo("Koordinat", "Kapat butonuna fareyi götür ve 3 sn bekle...")
+        self.after(3000, self._capture_kapat_coord)
+
+    def _capture_kapat_coord(self):
+        self.kapat_coord = pyautogui.position()
+        messagebox.showinfo("Koordinat", f"Arama Kapat: {self.kapat_coord}")
+
+    def set_hotkey(self):
+        key = self.entry_hotkey.get().strip().lower()
+        if not key:
+            messagebox.showerror("Hata", "Lütfen bir tuş girin! (örn: F8 veya z)")
+            return
+        try:
+            if key.startswith("f") and key[1:].isdigit():
+                # e.g. f8 -> Key.f8
+                self.hotkey = getattr(pyn_keyboard.Key, key)
+            else:
+                # single character hotkey
+                self.hotkey = key
+            self.hotkey_str = key
+            messagebox.showinfo("Kısayol Ayarlandı", f"Başlat/Durdur için yeni tuş: {key.upper()}")
+            # değişikliği kaydet (sadece not ayarlarını kaydeder, numara notlarını değil)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+        except Exception as e:
+            messagebox.showerror("Hata", f"Kısayol atanamadı: {e}")
+
+    def update_sayac(self):
+        self.label_sayac.configure(
+            text=f"Aranan: {self.start_index}/{len(self.numbers)}  |  Kalan: {max(0, len(self.numbers) - self.start_index)}"
+        )
+
+    # -------------------- Bot Çalıştır / Durdur --------------------
+    def toggle_bot(self):
+        if self.running:
+            self.running = False
+            self._stop_event.set()
+            if self.worker_thread and self.worker_thread.is_alive():
+                self.worker_thread.join(timeout=1.0)
+            self.btn_start.configure(text="▶ Başlat", fg_color="green")
+        else:
+            if not self.numbers:
+                messagebox.showwarning("Uyarı", "Önce Excel yükleyin.")
+                return
+            self.running = True
+            self._stop_event.clear()
+            self.worker_thread = threading.Thread(target=self.run_bot, daemon=True)
+            self.worker_thread.start()
+            self.btn_start.configure(text="⏹ Durdur", fg_color="red")
+
+    def run_bot(self):
+        while self.running and not self._stop_event.is_set() and self.start_index < len(self.numbers):
+            idx, num = self.numbers[self.start_index]
+
+            try:
+                if self.ara_coord:
+                    pyautogui.click(self.ara_coord)
+                    time.sleep(0.1)
+                    pyautogui.click(self.ara_coord)
+                    pyperclip.copy(str(num))  # str() ekledik
+                    pyautogui.hotkey("ctrl", "v")
+                    time.sleep(0.05)
+                    pyautogui.press("enter")
+
+                if self.otomatik_mod.get() and self.kapat_coord:
+                    time.sleep(__import__("random").randint(4, 7))
+                    pyautogui.click(self.kapat_coord)
+                    time.sleep(0.7)
+
+                self.start_index += 1
+                self.ui_call(self.update_sayac)
+
+                if self.not_al.get() and self.show_not_window.get():
+                    self.current_num = num
+                    self.ui_call(self.show_not_al_window, num)
+
+                if not self.otomatik_mod.get():
+                    break
+
+            except Exception as e:
+                print("run_bot hata:", e)
+                self.start_index += 1
+
+        self.running = False
+        self.ui_call(self.btn_start.configure, text="▶ Başlat", fg_color="green")
+
+    # -------------------- Not Ayarları --------------------
+    def open_not_ayar(self):
+        win = Toplevel(self)
+        win.title("Not Ayarları")
+        win.geometry("420x570")
+
+        ctk.CTkSwitch(win, text="📝 Not Al", variable=self.not_al, text_color="black").pack(pady=5)
+        ctk.CTkSwitch(win, text="Not Penceresi Göster", variable=self.show_not_window, text_color="black").pack(
+            pady=5
+        )
+
+        self.durum_entries = {}
+        frame = ctk.CTkFrame(win)
+        frame.pack(fill="both", expand=True, pady=10, padx=10)
+
+        for i in range(1, 10):
+            row = ctk.CTkFrame(frame)
+            row.pack(fill="x", pady=3)
+            ctk.CTkLabel(row, text=f"{i} -", width=25).pack(side="left")
+            entry = ctk.CTkEntry(row, width=300)
+            entry.insert(0, self.durum_tanimlari.get(i, f"Durum {i}"))
+            entry.pack(side="left", padx=5)
+            self.durum_entries[i] = entry
+
+        def kaydet():
+            for i in range(1, 10):
+                self.durum_tanimlari[i] = self.durum_entries[i].get()
+            # sadece NOT AYARLARINI kaydet (numara notlarını değil)
+            self.save_settings()
+            win.destroy()
+
+        ctk.CTkButton(win, text="Kaydet", command=kaydet).pack(pady=10)
+
+    # -------------------- Not Al (numara için geçici pencere) --------------------
+    def _find_row_for_number(self, num: str) -> Optional[int]:
+        for row, n in self.numbers:
+            if n == num:
+                return row
+        return None
+
+    def show_not_al_window(self, num: str):
+        if self.not_win and getattr(self.not_win, "winfo_exists", lambda: False)():
+            try:
+                self.not_win.destroy()
+            except Exception:
+                pass
+
+        self.not_win = Toplevel(self)
+        self.not_win.title(f"Not Al - {num}")
+        self.not_win.geometry("420x300")
+
+        lbl = ctk.CTkLabel(
+            self.not_win,
+            text=f"{num}\nNumaranın durumunu seç veya yaz:",
+            justify="left",
+            text_color="black",
+        )
+        lbl.pack(anchor="w", padx=10, pady=10)
+
+        self.note_entry = ctk.CTkEntry(self.not_win, width=300, placeholder_text="Durumu yaz...")
+        self.note_entry.pack(pady=5)
+        self.not_win.after_idle(lambda: self.note_entry.focus_force())
+        self.not_win.after(200, lambda: self.note_entry.focus_force())
+
+        scroll_frame = ctk.CTkScrollableFrame(self.not_win, width=380, height=150)
+        scroll_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        def kaydet_durum(durum: str):
+            # bu notu sadece geçici olarak saklıyoruz ve Excel'e yazıyoruz,
+            # fakat numara_durumlari JSON içine kaydedilmeyecek (kullanıcı istediği gibi)
+            self.numara_durumlari[num] = durum
+            if self.excel_path:
+                try:
+                    row_idx = self._find_row_for_number(num)
+                    if row_idx is None:
+                        raise ValueError("Numara excel listesinde bulunamadı.")
+                    wb = openpyxl.load_workbook(self.excel_path)
+                    ws = wb.active
+                    ws.cell(row=row_idx, column=3, value=durum)
+                    wb.save(self.excel_path)
+                    wb.close()
+                except Exception as e:
+                    messagebox.showerror("Kaydetme Hatası", f"Excel kaydedilemedi:\n{e}")
+            try:
+                if self.not_win:
+                    self.not_win.destroy()
+            except Exception:
+                pass
+
+        for i in range(1, 10):
+            txt = self.durum_tanimlari.get(i, f"Durum {i}")
+            btn = ctk.CTkButton(scroll_frame, text=f"{i} - {txt}", command=lambda d=txt: kaydet_durum(d))
+            btn.pack(pady=2, fill="x", padx=5)
+
+        ctk.CTkButton(self.not_win, text="Enter veya Manuel Kaydet",
+                      command=lambda: kaydet_durum(self.note_entry.get())).pack(
+            pady=10
+        )
+
+        self.not_win.bind("<Return>", lambda e: kaydet_durum(self.note_entry.get()))
+
+        def handle_key(e):
+            try:
+                ch = getattr(e, "char", "")
+                if ch.isdigit() and int(ch) in self.durum_tanimlari:
+                    kaydet_durum(self.durum_tanimlari[int(ch)])
+            except Exception:
+                pass
+
+        self.not_win.bind("<Key>", handle_key)
+
+    # -------------------- Hotkey --------------------
+    def on_key_press(self, key):
+        try:
+            # ESC tuşu → botu her durumda durdur
+            if key == pyn_keyboard.Key.esc:
+                if self.running:
+                    self.ui_call(self.toggle_bot)
+                return
+
+            # Eğer not penceresi açıksa ve hotkey'e basılırsa kapat
+            if self.not_win and getattr(self.not_win, "winfo_exists", lambda: False)():
+                matches = False
+                if isinstance(self.hotkey, str):
+                    if hasattr(key, "char") and key.char == self.hotkey:
+                        matches = True
+                else:
+                    if key == self.hotkey:
+                        matches = True
+
+                if matches:
+                    self.ui_call(self.not_win.destroy)
+                return
+
+            # Hotkey entry'si aktifken görmezden gel
+            focused = self.focus_get()
+            if focused and str(focused) == str(self.entry_hotkey):
+                return
+
+            if isinstance(self.hotkey, str) and hasattr(key, "char") and key.char == self.hotkey:
+                self.toggle_bot()
+            elif key == self.hotkey:
+                self.toggle_bot()
+        except Exception:
+            pass
+
+            # -------------------- Kapanış ve Excel kaydı --------------------
+    def on_closing(self):
+        self.running = False
+        self._stop_event.set()
+
+        # stop unused worker if running
+        try:
+            if hasattr(self, "_unused_stop_event"):
+                self._unused_stop_event.set()
+                time.sleep(0.1)
+        except Exception:
+            pass
+
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=2.0)
+
+        try:
+            if self.listener:
+                self.listener.stop()
+                time.sleep(0.1)
+        except Exception:
+            pass
+
+        # Excel kaydı (tüm notları aktarma)
+        if self.excel_path:
+            try:
+                wb = openpyxl.load_workbook(self.excel_path)
+                ws = wb.active
+                durum_col = 3  # C sütunu
+                for idx, num in self.numbers:
+                    durum = self.numara_durumlari.get(num, "")
+                    if durum:
+                        ws.cell(row=idx, column=durum_col, value=durum)
+                wb.save(self.excel_path)
+                wb.close()
+            except Exception as e:
+                print("Excel kaydetme hatası on_closing:", e)
+
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+
+# ================== Program Giriş Noktası ==================
+if __name__ == "__main__":
+    #info = get_device_info()
+    #print(info)
+
+    # --- Lisans ekranını şimdilik devre dışı bırakıyoruz ---
+    # win = LicenseWindow()
+    # win.mainloop()
+
+    # --- Program doğrudan başlasın ---
+    app = InvektoBot()
+    app.mainloop()
+
+
+
