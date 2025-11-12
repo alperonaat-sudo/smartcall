@@ -6,7 +6,7 @@ Merhaba!
 Programın düzgün çalışması için aşağıdaki adımları izleyin:
 
 Model klasörünü masaüstüne veya doğrudan *C:* dizinine kopyalayın.
-(Örnek: C:\model şeklinde olabilir.)
+(Örnek: C:\model şeklinde olabilir.)   ---eski ses işlemede kullanılan kısım 
 
 VB-Cable programını kurun.
 Bu sanal ses sürücüsü, programın ses analizini doğru yapabilmesi için gereklidir.
@@ -17,4 +17,5 @@ varsayılan ses çıkışınızı “CABLE Input” olarak ayarlayın.
 Kurulum tamamlandıktan sonra smart_call_bot.exe dosyasını çalıştırabilirsiniz.
 
 İyi kullanımlar! 🎧
+
 Smart Call Bot Ekibi
